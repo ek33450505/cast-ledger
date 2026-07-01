@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+# cast-ledger — tamper-evident session receipts + provenance chain over cast.db.
+set -euo pipefail
+
+[[ "${CLAUDE_SUBPROCESS:-}" == "1" ]] && exit 0
+
+_source="${BASH_SOURCE[0]}"
+while [ -L "$_source" ]; do
+  _dir="$(cd -P "$(dirname "$_source")" && pwd)"
+  _source="$(readlink "$_source")"
+  [[ "$_source" != /* ]] && _source="$_dir/$_source"
+done
+SELF_DIR="$(cd -P "$(dirname "$_source")" && pwd)"
+
+_resolve_lib() {
+  local candidates=(
+    "${CAST_LEDGER_LIB:-}"
+    "$SELF_DIR/../scripts"
+    "$SELF_DIR/../lib/cast-ledger"
+    "$HOME/.local/lib/cast-ledger"
+  )
+  local c
+  for c in "${candidates[@]}"; do
+    [[ -n "$c" && -f "$c/cast-ledger.py" ]] && { printf '%s\n' "$c"; return 0; }
+  done
+  return 1
+}
+
+_resolve_version() {
+  local c
+  for c in "$SELF_DIR/../VERSION" "$SELF_DIR/../lib/cast-ledger/VERSION" "$HOME/.local/lib/cast-ledger/VERSION"; do
+    [[ -f "$c" ]] && { cat "$c"; return 0; }
+  done
+  printf 'unknown\n'
+}
+
+_die() { printf 'cast-ledger: %s\n' "$*" >&2; exit 1; }
+
+LIB="$(_resolve_lib || true)"
+[[ -n "$LIB" ]] || _die "cast-ledger scripts not found. Run: bash install.sh (or set CAST_LEDGER_LIB)"
+
+sub="${1:-}"
+case "$sub" in
+  provenance|chain)
+    shift
+    exec python3 "$LIB/cast-provenance-chain.py" "$@"
+    ;;
+  verify-chain)
+    shift
+    exec python3 "$LIB/cast-provenance-chain.py" verify "$@"
+    ;;
+  version|--version|-v)
+    printf 'cast-ledger v%s\n' "$(_resolve_version)"
+    ;;
+  help|--help|-h)
+    cat <<'EOF'
+Usage:
+  cast-ledger [SESSION_ID] [--last N] [--since DATE] [--json] [--out FILE] [--verify FILE]
+                                Render / verify a tamper-evident session receipt (read-only)
+  cast-ledger provenance <append|verify|backfill|status> [--db PATH]
+                                Manage the per-session provenance hash-chain
+  cast-ledger verify-chain      Alias for `provenance verify`
+  cast-ledger version
+EOF
+    ;;
+  *)
+    exec python3 "$LIB/cast-ledger.py" "$@"
+    ;;
+esac
