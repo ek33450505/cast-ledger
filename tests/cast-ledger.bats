@@ -25,9 +25,10 @@ _make_db() {
   command -v sqlite3 >/dev/null || skip "sqlite3 not available"
   sqlite3 "$CAST_DB_PATH" "
 CREATE TABLE sessions(id TEXT, project TEXT, project_root TEXT, started_at TEXT, ended_at TEXT, status TEXT);
-CREATE TABLE agent_runs(session_id TEXT, agent TEXT, model TEXT, status TEXT, started_at TEXT, ended_at TEXT, input_tokens INTEGER, output_tokens INTEGER, cost_usd REAL, cache_read_input_tokens INTEGER, cache_creation_input_tokens INTEGER, owns_files TEXT, duration_ms INTEGER, tool_uses INTEGER);
+CREATE TABLE agent_runs(session_id TEXT, agent TEXT, model TEXT, status TEXT, started_at TEXT, ended_at TEXT, input_tokens INTEGER, output_tokens INTEGER, cost_usd REAL, cache_read_input_tokens INTEGER, cache_creation_input_tokens INTEGER, duration_ms INTEGER, tool_uses INTEGER);
 INSERT INTO sessions VALUES('sess-test-1','demo','/tmp/demo','2026-07-01T10:00:00','2026-07-01T10:30:00','completed');
-INSERT INTO agent_runs VALUES('sess-test-1','code-writer','claude-opus-4-8','DONE','2026-07-01T10:01:00','2026-07-01T10:05:00',100,200,0.05,10,5,'',240000,7);
+INSERT INTO agent_runs VALUES('sess-test-1','code-writer','claude-opus-4-8','DONE','2026-07-01T10:01:00','2026-07-01T10:05:00',100,200,0.05,10,5,240000,7);
+INSERT INTO agent_runs VALUES('sess-test-1','code-reviewer','claude-sonnet-5','DONE','2026-07-01T10:06:00','2026-07-01T10:09:00',50,80,0.02,4,2,180000,3);
 "
 }
 
@@ -196,4 +197,34 @@ open('$BATS_TEST_TMPDIR/r.md', 'w').write(corrupted)
 @test "uninstall.sh has no bash syntax errors" {
   run bash -n "$REPO_DIR/uninstall.sh"
   [ "$status" -eq 0 ]
+}
+
+# 19. REGRESSION: the receipt must actually report the session's agent runs.
+# cast-ledger v0.1.0 selected the dropped `owns_files` column; the bare
+# `except sqlite3.OperationalError: return []` swallowed it, so every receipt
+# claimed zero agents while the DB held rows. Asserting the COUNT is what makes
+# a schema drift visible — rendering the header alone never could.
+@test "receipt reports the real agent-run count, not an empty set" {
+  _make_db
+  run bash "$CLI" sess-test-1
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"## Agents (2)"* ]]
+  [[ "$output" == *"code-writer"* ]]
+  [[ "$output" == *"code-reviewer"* ]]
+}
+
+# 20. REGRESSION: a standalone DB whose provenance_chain predates receipt_json
+# must be self-healed by ALTER. CREATE TABLE IF NOT EXISTS is a no-op there, so
+# without the ALTER the append succeeds but stores a digest with no payload to
+# re-derive it from — the exact condition PROV-1 was written to eliminate.
+@test "append self-heals a pre-receipt_json chain table and stores the payload" {
+  _make_db
+  sqlite3 "$CAST_DB_PATH" "
+CREATE TABLE provenance_chain (seq INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, prev_hash TEXT NOT NULL DEFAULT '', session_digest TEXT NOT NULL, chain_hash TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (datetime('now')));"
+  run bash "$CLI" provenance append sess-test-1
+  [ "$status" -eq 0 ]
+  run sqlite3 "$CAST_DB_PATH" "SELECT COUNT(*) FROM pragma_table_info('provenance_chain') WHERE name='receipt_json';"
+  [ "$output" = "1" ]
+  run sqlite3 "$CAST_DB_PATH" "SELECT COUNT(*) FROM provenance_chain WHERE receipt_json IS NOT NULL AND LENGTH(receipt_json) > 0;"
+  [ "$output" = "1" ]
 }
