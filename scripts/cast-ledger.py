@@ -133,7 +133,7 @@ def _fetch_agent_runs(conn: sqlite3.Connection, session_id: str) -> List[Dict]:
             "SELECT agent, model, status, started_at, ended_at, "
             "input_tokens, output_tokens, cost_usd, "
             "cache_read_input_tokens, cache_creation_input_tokens, "
-            "owns_files, duration_ms, tool_uses "
+            "duration_ms, tool_uses "
             "FROM agent_runs "
             "WHERE session_id = ? "
             "ORDER BY started_at, rowid",
@@ -181,12 +181,13 @@ def _fetch_routing_events(conn: sqlite3.Connection, session_id: str) -> List[Dic
 
 
 def _fetch_quality_gates(conn: sqlite3.Connection, session_id: str) -> List[Dict]:
-    """Fetch quality_gates rows ordered by created_at."""
+    """Fetch quality_gates rows ordered by created_at (excludes truncation-mirror rows, status_line='TRUNCATED')."""
     try:
         rows = conn.execute(
             "SELECT agent_name, gate_type, contract_passed, retry_count, created_at "
             "FROM quality_gates "
             "WHERE session_id = ? "
+            "AND status_line IS NOT 'TRUNCATED' "
             "ORDER BY created_at",
             (session_id,),
         ).fetchall()
@@ -298,16 +299,35 @@ def _build_receipt_data(
 
 # ── Digest computation ────────────────────────────────────────────────────────
 
-def _compute_digest(data: Dict[str, Any]) -> str:
-    """Compute deterministic SHA-256 digest of the canonical data dict."""
-    serialized = json.dumps(
+def canonical_json(data: Dict[str, Any]) -> str:
+    """Serialize the canonical data dict exactly as _compute_digest hashes it.
+
+    Exposed so a caller can PERSIST the bytes the digest was taken over. The
+    receipt's inputs are not immutable — retention prunes agent_runs out from
+    under them and CAST's own writers backfill cost/token/tool_uses columns after
+    a session ends — so a digest with no stored payload can never be re-derived,
+    and re-deriving it from live data answers a different question than the one
+    the chain is asked. See cast-provenance-chain.py's verify for what each
+    outcome means.
+    """
+    return json.dumps(
         data,
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=False,
         default=str,
-    ).encode("utf-8")
+    )
+
+
+def _compute_digest(data: Dict[str, Any]) -> str:
+    """Compute deterministic SHA-256 digest of the canonical data dict."""
+    serialized = canonical_json(data).encode("utf-8")
     return "sha256:" + hashlib.sha256(serialized).hexdigest()
+
+
+def digest_of_canonical_json(payload: str) -> str:
+    """Digest a STORED canonical serialization, without rebuilding it from the DB."""
+    return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 # ── Duration helper ───────────────────────────────────────────────────────────
